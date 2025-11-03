@@ -1,0 +1,79 @@
+# ===============================
+# Python
+# ===============================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Environment variables and settings
+.env
+*.env
+.env.*
+
+# Build and distribution folders
+build/
+dist/
+*.egg-info/
+
+# Byte-compiled / optimized / DLL files
+*.dll
+*.so
+*.dylib
+*.pyd
+
+# Logs and debug
+*.log
+logs/
+debug.log
+
+# Jupyter and IPython
+.ipynb_checkpoints/
+*.ipynb
+
+# ===============================
+# Project specific
+# ===============================
+
+# SQLite database
+*.db
+*.sqlite3
+
+# Cache and temporary data
+__pycache__/
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Streamlit cache and settings
+.streamlit/
+.streamlit/secrets.toml
+.streamlit/config.toml
+
+# VSCode / IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# ===============================
+# Generated analytics or data
+# ===============================
+analytics.csv
+*.csv
+*.ndjson
+
+# ===============================
+# Warp / AI generated cache
+# ===============================
+warp-agent-cache/
+warp_output/
+warp_tmp/

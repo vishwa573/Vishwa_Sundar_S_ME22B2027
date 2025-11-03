@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+websockets
+pandas
+numpy
+statsmodels
+streamlit
+streamlit-autorefresh
+plotly
+sqlalchemy
+aiofiles
+requests
+aiosqlite
