@@ -10,23 +10,73 @@ from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(layout="wide", page_title="Real-Time Quant Dashboard")
 
-st.sidebar.header("Controls")
-symbol_a = st.sidebar.text_input("Symbol A", value="btcusdt").lower()
-symbol_b = st.sidebar.text_input("Symbol B", value="ethusdt").lower()
-timeframe = st.sidebar.selectbox("Timeframe", ["1s", "1m", "5m"], index=0)
-regression_type = st.sidebar.selectbox("Regression Type", ["OLS", "Huber", "Kalman"], index=0)
-rolling_window = st.sidebar.slider("Rolling Window", min_value=10, max_value=200, value=50)
-use_ohlc = st.sidebar.checkbox("Use uploaded OHLC data", value=False)
-z_alert = st.sidebar.number_input("Z-Score Alert Threshold", value=2.0)
-min_corr = st.sidebar.slider("Min Rolling Corr (alerts)", min_value=-1.0, max_value=1.0, value=-0.2, step=0.05)
-hyst = st.sidebar.slider("Alert Hysteresis", min_value=0.0, max_value=1.0, value=0.2, step=0.05)
-min_vol = st.sidebar.number_input("Min Volume per bar (alerts)", value=0.0, step=1.0)
-lookback_hours = st.sidebar.number_input("Lookback Hours", min_value=1, max_value=168, value=6)
-# Refresh controls
-auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
-refresh_ms = st.sidebar.slider("Refresh interval (ms)", min_value=500, max_value=5000, value=1500, step=100)
-adf_win = st.sidebar.slider("Rolling ADF Window (0=off)", min_value=0, max_value=300, value=0, step=10)
-run_adf = st.sidebar.button("Run ADF Test on Spread")
+# Custom styling
+st.markdown(
+    """
+    <style>
+    section[data-testid="stSidebar"] > div { background: #0b1220; }
+    .sidebar-title { font-weight: 700; font-size: 1rem; margin: 0.25rem 0 0.5rem 0; }
+    .badge-live { display:inline-block; padding:2px 8px; border-radius:12px; background:#1f6feb; color:#fff; font-size:0.75rem; margin-left:8px; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.sidebar.markdown("### ⚙️ Control Panel")
+
+# Pair & Symbols
+with st.sidebar.expander("🎯 Pair & Symbols", expanded=True):
+    # Bind to session state for swap/presets
+    if "sym_a" not in st.session_state:
+        st.session_state.sym_a = "btcusdt"
+    if "sym_b" not in st.session_state:
+        st.session_state.sym_b = "ethusdt"
+    c1, c2 = st.columns(2)
+    with c1:
+        st.session_state.sym_a = st.text_input("Symbol A", value=st.session_state.sym_a).lower()
+    with c2:
+        st.session_state.sym_b = st.text_input("Symbol B", value=st.session_state.sym_b).lower()
+    colx, coly = st.columns([1,2])
+    if colx.button("Swap A/B"):
+        st.session_state.sym_a, st.session_state.sym_b = st.session_state.sym_b, st.session_state.sym_a
+        try:
+            st.rerun()
+        except Exception:
+            st.experimental_rerun()
+    preset = coly.selectbox("Preset", ["—", "BTC/ETH", "BTC/BNB", "ETH/BNB"], index=0)
+    if preset != "—" and st.button("Apply preset"):
+        pa, pb = ("btcusdt","ethusdt") if preset=="BTC/ETH" else ("btcusdt","bnbusdt") if preset=="BTC/BNB" else ("ethusdt","bnbusdt")
+        st.session_state.sym_a, st.session_state.sym_b = pa, pb
+        try:
+            st.rerun()
+        except Exception:
+            st.experimental_rerun()
+    symbol_a = st.session_state.sym_a
+    symbol_b = st.session_state.sym_b
+
+# Time & Model
+with st.sidebar.expander("⏱️ Time & Model", expanded=True):
+    timeframe = st.radio("Timeframe", ["1s", "1m", "5m"], index=0, horizontal=True)
+    regression_type = st.selectbox("Regression", ["OLS", "Huber", "Kalman"], index=0)
+    rolling_window = st.slider("Rolling Window", min_value=10, max_value=200, value=50)
+
+# Refresh
+with st.sidebar.expander("🔄 Refresh", expanded=True):
+    auto_refresh = st.checkbox("Auto-refresh", value=True)
+    refresh_ms = st.slider("Refresh interval (ms)", min_value=500, max_value=5000, value=1500, step=100)
+
+# Analytics
+with st.sidebar.expander("📊 Analytics", expanded=False):
+    use_ohlc = st.checkbox("Use uploaded OHLC data", value=False)
+    show_volume = st.checkbox("Show Volume/VWAP (slower)", value=False)
+    max_ticks = st.number_input("Max ticks per symbol", min_value=500, max_value=200000, value=20000, step=500)
+    z_alert = st.number_input("Z-Score Alert Threshold", value=2.0)
+    min_corr = st.slider("Min Rolling Corr (alerts)", min_value=-1.0, max_value=1.0, value=-0.2, step=0.05)
+    hyst = st.slider("Alert Hysteresis", min_value=0.0, max_value=1.0, value=0.2, step=0.05)
+    min_vol = st.number_input("Min Volume per bar (alerts)", value=0.0, step=1.0)
+    lookback_hours = st.number_input("Lookback Hours", min_value=1, max_value=168, value=6)
+    adf_win = st.slider("Rolling ADF Window (0=off)", min_value=0, max_value=300, value=0, step=10)
+    run_adf = st.button("Run ADF Test on Spread")
 
 # Auto-refresh (toggleable)
 if auto_refresh:
@@ -57,6 +107,50 @@ if uploaded is not None:
             st.sidebar.warning("CSV must include a 'symbol' column")
     except Exception as e:
         st.sidebar.error(f"Upload error: {e}")
+
+# Sidebar: Alerts
+st.sidebar.markdown("---")
+st.sidebar.subheader("Alerts")
+with st.sidebar.form("alert_form", clear_on_submit=True):
+    a_name = st.text_input("Name", value="rule1")
+    a_enable = st.checkbox("Enabled", value=True)
+    a_webhook = st.text_input("Webhook URL (optional)", value="")
+    submitted = st.form_submit_button("Add alert for current pair")
+    if submitted:
+        try:
+            payload = {
+                "name": a_name, "enabled": a_enable,
+                "symbol_a": symbol_a, "symbol_b": symbol_b, "timeframe": timeframe,
+                "z_threshold": float(z_alert), "corr_min": float(min_corr),
+                "min_vol": float(min_vol), "hysteresis": float(hyst),
+                "webhook_url": (a_webhook or None),
+            }
+            r = requests.post(f"{API_BASE}/api/alerts", json=payload, timeout=120)
+            st.success("Alert added") if r.ok else st.error("Failed")
+        except Exception as e:
+            st.error(f"Add failed: {e}")
+
+load_alerts = st.sidebar.checkbox("Show alerts list", value=False)
+if load_alerts:
+    try:
+        al = requests.get(f"{API_BASE}/api/alerts", timeout=120).json().get("alerts", [])
+        for rule in al:
+            cols = st.sidebar.columns([3,1,1])
+            cols[0].write(f"{rule['name']} ({rule['symbol_a']}-{rule['symbol_b']} {rule['timeframe']})")
+            if cols[1].button("Toggle", key=f"tgl_{rule['id']}"):
+                try:
+                    requests.patch(f"{API_BASE}/api/alerts/{rule['id']}", json={"enabled": not rule['enabled']}, timeout=10)
+                    st.sidebar.success("Toggled")
+                except Exception as e:
+                    st.sidebar.error(f"Toggle failed: {e}")
+            if cols[2].button("Delete", key=f"del_{rule['id']}"):
+                try:
+                    requests.delete(f"{API_BASE}/api/alerts/{rule['id']}", timeout=120)
+                    st.sidebar.success("Deleted")
+                except Exception as e:
+                    st.sidebar.error(f"Delete failed: {e}")
+    except Exception:
+        pass
 
 # Sidebar: ADF test under the button
 adf_box = st.sidebar.container()
@@ -91,7 +185,7 @@ sel_subs = st.sidebar.multiselect("Subscribe symbols", options=all_syms, default
 colA, colB = st.sidebar.columns([1,1])
 if colA.button("Apply Subscriptions"):
     try:
-        requests.post(f"{API_BASE}/api/subscriptions", params={"symbols": ",".join(sel_subs)}, timeout=10)
+        requests.post(f"{API_BASE}/api/subscriptions", params={"symbols": ",".join(sel_subs)}, timeout=120)
         st.sidebar.success("Updated subscriptions (ingester will adjust within ~5s)")
     except Exception as e:
         st.sidebar.error(f"Failed to update subscriptions: {e}")
@@ -99,7 +193,7 @@ if colB.button("Refresh List"):
     get_subscriptions_cached.clear()
 
 @st.cache_data(ttl=1)
-def fetch_analytics(symbol_a: str, symbol_b: str, timeframe: str, rolling_window: int, regression_type: str, use_ohlc: bool, adf_window: int, lookback_hours: int):
+def fetch_analytics(symbol_a: str, symbol_b: str, timeframe: str, rolling_window: int, regression_type: str, use_ohlc: bool, adf_window: int, lookback_hours: int, include_volume: bool, max_ticks: int):
     params = {
         "symbol_a": symbol_a,
         "symbol_b": symbol_b,
@@ -109,8 +203,10 @@ def fetch_analytics(symbol_a: str, symbol_b: str, timeframe: str, rolling_window
         "use_ohlc": json.dumps(use_ohlc),
         "adf_window": adf_window,
         "lookback_hours": int(lookback_hours),
+        "include_volume": json.dumps(include_volume),
+        "max_ticks": int(max_ticks),
     }
-    r = requests.get(f"{API_BASE}/api/analytics", params=params, timeout=10)
+    r = requests.get(f"{API_BASE}/api/analytics", params=params, timeout=120)
     r.raise_for_status()
     return r.json()
 
@@ -134,9 +230,21 @@ def to_dataframe(data: dict) -> pd.DataFrame:
 
 st.title("Real-Time Quantitative Analytics Dashboard")
 
+# Quick live panel (lighter payload)
+with st.expander("Live quick panel"):
+    enable_quick = st.checkbox("Enable quick panel", value=False)
+    if enable_quick:
+        try:
+            q = requests.get(f"{API_BASE}/api/analytics_quick", params={"symbol_a": symbol_a, "symbol_b": symbol_b, "timeframe": timeframe, "lookback_hours": 1}, timeout=45)
+            q.raise_for_status()
+            qd = q.json()
+            st.metric("Latest Z (quick)", None if qd.get("latest_zscore") is None else f"{qd['latest_zscore']:.2f}")
+        except Exception as e:
+            st.write(f"Quick panel error: {e}")
+
 try:
     t0 = time.perf_counter()
-    data = fetch_analytics(symbol_a, symbol_b, timeframe, rolling_window, regression_type, use_ohlc, adf_win, lookback_hours)
+    data = fetch_analytics(symbol_a, symbol_b, timeframe, rolling_window, regression_type, use_ohlc, adf_win, lookback_hours, show_volume, max_ticks)
     api_ms = (time.perf_counter() - t0) * 1000
     st.sidebar.subheader("Diagnostics")
     st.sidebar.text(f"API {api_ms:.0f} ms | points={len(data.get('price_data',{}).get('index',[]))}")
@@ -183,14 +291,16 @@ fig_corr = go.Figure()
 fig_corr.add_trace(go.Scatter(x=frame.index, y=frame["rolling_corr"], name="Rolling Corr"))
 fig_corr.update_layout(title="Rolling Correlation", xaxis_title="Time", yaxis_title="Correlation", template="plotly_dark")
 
-# Volume chart
-vol_map = data.get("volume", {})
-fig_vol = go.Figure()
-if vol_map.get(symbol_a):
-    fig_vol.add_trace(go.Bar(x=frame.index, y=vol_map[symbol_a], name=f"{symbol_a.upper()} Vol", opacity=1.0))
-if vol_map.get(symbol_b):
-    fig_vol.add_trace(go.Bar(x=frame.index, y=vol_map[symbol_b], name=f"{symbol_b.upper()} Vol", opacity=1.0))
-fig_vol.update_layout(title="Resampled Volume", xaxis_title="Time", yaxis_title="Volume", template="plotly_dark")
+# Volume chart (optional)
+fig_vol = None
+if show_volume:
+    vol_map = data.get("volume", {})
+    fig_vol = go.Figure()
+    if vol_map.get(symbol_a):
+        fig_vol.add_trace(go.Bar(x=frame.index, y=vol_map[symbol_a], name=f"{symbol_a.upper()} Vol", opacity=1.0))
+    if vol_map.get(symbol_b):
+        fig_vol.add_trace(go.Bar(x=frame.index, y=vol_map[symbol_b], name=f"{symbol_b.upper()} Vol", opacity=1.0))
+    fig_vol.update_layout(title="Resampled Volume", xaxis_title="Time", yaxis_title="Volume", template="plotly_dark")
 
 # Tabs layout
 tab_dash, tab_charts, tab_heat, tab_data, tab_bt = st.tabs(["Dashboard", "Detailed Charts", "Heatmap", "Data View", "Backtest"])
@@ -253,7 +363,8 @@ with tab_dash:
 
     st.plotly_chart(fig_price, width='stretch')
     st.plotly_chart(fig_z, width='stretch')
-    st.plotly_chart(fig_vol, width='stretch')
+    if fig_vol is not None:
+        st.plotly_chart(fig_vol, width='stretch')
 
 with tab_charts:
     st.plotly_chart(fig_spread, width='stretch')
@@ -266,7 +377,7 @@ with tab_heat:
     compute_hm = st.button("Compute heatmap")
     if compute_hm and heat_syms:
         try:
-            r = requests.get(f"{API_BASE}/api/heatmap", params={"symbols": ",".join(heat_syms), "timeframe": timeframe, "window": heat_win, "use_ohlc": json.dumps(use_ohlc)}, timeout=10)
+            r = requests.get(f"{API_BASE}/api/heatmap", params={"symbols": ",".join(heat_syms), "timeframe": timeframe, "window": heat_win, "use_ohlc": json.dumps(use_ohlc)}, timeout=120)
             mat = r.json()
             import plotly.express as px
             z = mat.get("matrix", [])
@@ -322,7 +433,7 @@ def fetch_backtest(symbol_a: str, symbol_b: str, timeframe: str, entry_z: float,
         "regression_type": regression_type.lower(),
         "use_ohlc": json.dumps(use_ohlc),
     }
-    r = requests.get(f"{API_BASE}/api/backtest", params=params, timeout=10)
+    r = requests.get(f"{API_BASE}/api/backtest", params=params, timeout=120)
     r.raise_for_status()
     return r.json()
 
@@ -332,7 +443,30 @@ with tab_bt:
         if bt.get("index"):
             bt_df = pd.DataFrame({"pnl": bt["pnl"]}, index=pd.to_datetime(bt["index"]))
             st.line_chart(bt_df["pnl"])
+            m = bt.get("metrics", {})
+            st.write({k: (None if v is None else round(v, 3)) for k, v in m.items()})
         else:
             st.info("Backtest waiting for data…")
     except Exception as e:
         st.error(f"Backtest failed: {e}")
+
+    st.subheader("Parameter sweep")
+    c1, c2, c3 = st.columns(3)
+    e_min = c1.number_input("Entry min", value=1.0)
+    e_max = c2.number_input("Entry max", value=3.0)
+    e_step = c3.number_input("Entry step", value=0.5)
+    exits = st.text_input("Exit z list", value="0.0,0.5")
+    if st.button("Run grid"):
+        try:
+            r = requests.get(f"{API_BASE}/api/backtest_grid", params={
+                "symbol_a": symbol_a, "symbol_b": symbol_b, "timeframe": timeframe,
+                "entry_min": e_min, "entry_max": e_max, "entry_step": e_step, "exit_levels": exits,
+                "regression_type": regression_type.lower(), "use_ohlc": json.dumps(use_ohlc)
+            }, timeout=50)
+            r.raise_for_status()
+            res = r.json()
+            st.write("Best:", res.get("best"))
+            if res.get("grid"):
+                st.dataframe(pd.DataFrame(res["grid"]))
+        except Exception as e:
+            st.error(f"Grid failed: {e}")

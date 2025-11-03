@@ -14,3 +14,4 @@ aiosqlite
 scikit-learn
 python-multipart
 pykalman
+httpx

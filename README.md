@@ -81,3 +81,20 @@ streamlit run frontend/app.py
 - Architecture Diagram: see `docs/architecture.drawio` and `docs/architecture.svg`.
 - ChatGPT usage transparency: see `CHATGPT_USAGE.md`.
 
+## Architecture, Design, & Scalability
+
+### Core Design & Trade-offs
+This app follows a modular, API-driven pipeline: WebSocket Ingester → SQLite → FastAPI → Streamlit, so ingestion, storage, analytics, and UI remain loosely coupled and can evolve independently [cite: 57]. The explicit API boundary allows us to run and scale each part separately, swap data sources (ticks, OHLC, CSV), and keep front-end rendering decoupled from back-end compute.
+
+We chose SQLite for the prototype because it is zero-setup, file-based, and extremely fast to get running locally, which aligns with the assignment’s “one-day” deliverable focus [cite: 51, 60]. Its simplicity makes iteration and testing easy, and it avoids operational overhead during rapid development.
+
+### Identified Scaling Challenges
+The key bottlenecks we observed are intentional to surface real-world trade-offs [cite: 64].
+- Database Contention: as the single `ticks.db` grows, SQLite’s single-file design introduces write-locking contention when the high-frequency WebSocket ingester flushes batches while the analytics API performs large reads, causing I/O stalls and increased latency.
+- API Latency: CPU-heavy analytics (e.g., Kalman filters, rolling ADF, backtest grid) executed inline with live requests can lead to slow responses or timeouts under load, especially with longer lookbacks or multiple concurrent users.
+
+### Future Mitigation (Production-Scale Path)
+Database: migrate from SQLite to a client-server store like PostgreSQL (row-store with robust concurrency) or a purpose-built time-series database (e.g., InfluxDB) to sustain high-concurrent reads/writes and large histories. Partitioning, proper indexes, and WAL/retention policies would further reduce contention.
+
+API/Analytics: move heavy analytics to asynchronous workers (e.g., Celery) and cache results in Redis so the API only serves cached summaries for near-instant responses. Long-running jobs (rolling ADF, Kalman, grid search) would be scheduled, materialized, and streamed to the UI as they complete rather than computed in-request.
+

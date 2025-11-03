@@ -1,8 +1,10 @@
 import logging
-from typing import Dict, Any
+import asyncio
+from typing import Dict, Any, List
 
 import pandas as pd
-from fastapi import FastAPI, Query, UploadFile, File
+import httpx
+from fastapi import FastAPI, Query, UploadFile, File, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.analytics import (
@@ -17,8 +19,8 @@ from backend.analytics import (
     calculate_rolling_correlation,
     run_adf_test,
 )
-from backend.backtest import run_simple_backtest
-from backend.database import Subscription, SYNC_DB_URL
+from backend.backtest import run_simple_backtest, compute_metrics
+from backend.database import Subscription, AlertRule, SYNC_DB_URL
 from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import Session
 
@@ -47,9 +49,12 @@ async def analytics(
     use_ohlc: bool = Query(False, description="Use uploaded OHLC data instead of live ticks"),
     adf_window: int = Query(0, ge=0, description="If >0, return rolling ADF p-values on spread with this window"),
     lookback_hours: int = Query(6, ge=1, le=168, description="Limit DB scan to recent N hours"),
+    include_volume: bool = Query(False, description="Include volume/VWAP (extra DB read)"),
+    max_ticks: int = Query(0, ge=0, description="Per-symbol tick cap (0=unbounded)"),
+    evaluate_alerts: bool = Query(False, description="Evaluate alert rules (slower)"),
 ) -> Dict[str, Any]:
     symbols = [symbol_a.lower(), symbol_b.lower()]
-    df = load_data_and_resample(symbols, timeframe, use_ohlc, lookback_hours)
+    df = load_data_and_resample(symbols, timeframe, use_ohlc, lookback_hours, max_ticks)
 
     # Cold start guard: return whatever price data we have, defer analytics until enough points
     if df.empty:
@@ -88,8 +93,8 @@ async def analytics(
     z = calculate_zscore(spread)
     rc = calculate_rolling_correlation(df, symbols[0], symbols[1], rolling_window)
 
-    # Volume/VWAP
-    metrics = load_volume_and_vwap(symbols, timeframe, use_ohlc, lookback_hours)
+    # Volume/VWAP (optional)
+    metrics = load_volume_and_vwap(symbols, timeframe, use_ohlc, lookback_hours, max_ticks) if include_volume else {}
 
     # Rolling ADF p-values if requested
     adf_vals = None
@@ -108,10 +113,46 @@ async def analytics(
         "rolling_corr": rc.tolist(),
         "hedge_ratio": hr,
         "latest_zscore": float(z.iloc[-1]) if len(z) else None,
-        "volume": {s: (metrics.get(s, {}).get("volume", pd.Series(index=df.index)).reindex(df.index).fillna(0).tolist()) for s in symbols},
-        "vwap": {s: (metrics.get(s, {}).get("vwap", pd.Series(index=df.index)).reindex(df.index).tolist()) for s in symbols},
+        "volume": {s: (metrics.get(s, {}).get("volume", pd.Series(index=df.index)).reindex(df.index).fillna(0).tolist()) for s in symbols} if metrics else {},
+        "vwap": {s: (metrics.get(s, {}).get("vwap", pd.Series(index=df.index)).reindex(df.index).tolist()) for s in symbols} if metrics else {},
         "adf_pvalues": adf_vals,
+        "alerts_triggered": [],
     }
+
+    # Evaluate alert rules (non-blocking webhook)
+    if evaluate_alerts:
+        try:
+            eng = create_engine(SYNC_DB_URL)
+            with Session(eng) as s:
+                rules: List[AlertRule] = (
+                    s.query(AlertRule)
+                    .filter(AlertRule.enabled == True)
+                    .filter(AlertRule.symbol_a == symbols[0])
+                    .filter(AlertRule.symbol_b == symbols[1])
+                    .filter(AlertRule.timeframe == timeframe)
+                    .all()
+                )
+            latest_corr = float(rc.dropna().iloc[-1]) if len(rc.dropna()) else None
+            latest_vol_a = (metrics.get(symbols[0], {}).get("volume", pd.Series(index=df.index)).reindex(df.index).iloc[-1]) if len(df) else None
+            latest_vol_b = (metrics.get(symbols[1], {}).get("volume", pd.Series(index=df.index)).reindex(df.index).iloc[-1]) if len(df) else None
+            liquid = (latest_vol_a is not None and latest_vol_b is not None)
+            for r in rules:
+                cond_z = result["latest_zscore"] is not None and abs(result["latest_zscore"]) >= r.z_threshold
+                cond_corr = (latest_corr is not None) and (latest_corr <= r.corr_min)
+                cond_vol = (not liquid) or (latest_vol_a >= r.min_vol and latest_vol_b >= r.min_vol)
+                if cond_z and cond_corr and cond_vol:
+                    result["alerts_triggered"].append({"id": r.id, "name": r.name})
+                    if r.webhook_url:
+                        async def _fire(url: str, payload: dict):
+                            try:
+                                async with httpx.AsyncClient(timeout=2.0) as client:
+                                    await client.post(url, json=payload)
+                            except Exception:
+                                pass
+                        asyncio.create_task(_fire(r.webhook_url, {"rule": r.name, "latest_z": result["latest_zscore"], "corr": latest_corr}))
+        except Exception as e:
+            logger.warning("Alert evaluation failed: %s", e)
+
     logger.info("API: Returning analytics data.")
     return result
 
@@ -159,7 +200,39 @@ async def backtest(
     spread = calculate_spread(df, symbols[0], symbols[1], hr)
     z = calculate_zscore(spread)
     pnl = run_simple_backtest(z, entry_z=entry_z, exit_z=exit_z)
-    return {"index": [i.isoformat() for i in pnl.index], "pnl": pnl.tolist()}
+    metrics = compute_metrics(pnl)
+    return {"index": [i.isoformat() for i in pnl.index], "pnl": pnl.tolist(), "metrics": metrics}
+
+
+@app.get("/api/backtest_grid")
+async def backtest_grid(
+    symbol_a: str = Query(...), symbol_b: str = Query(...), timeframe: str = Query("1s"),
+    entry_min: float = Query(1.0), entry_max: float = Query(3.0), entry_step: float = Query(0.5),
+    exit_levels: str = Query("0.0,0.5"), regression_type: str = Query("ols"), use_ohlc: bool = Query(False)
+) -> Dict[str, Any]:
+    import numpy as np
+    symbols = [symbol_a.lower(), symbol_b.lower()]
+    df = load_data_and_resample(symbols, timeframe, use_ohlc)
+    if df.empty:
+        return {"grid": [], "best": None}
+    hr = calculate_ols_hedge_ratio(df, symbols[0], symbols[1]) if regression_type=="ols" else calculate_huber_hedge_ratio(df, symbols[0], symbols[1])
+    spread = calculate_spread(df, symbols[0], symbols[1], hr)
+    z = calculate_zscore(spread)
+    best = None
+    grid = []
+    exits = [float(x) for x in exit_levels.split(",") if x.strip()]
+    e = entry_min
+    while e <= entry_max + 1e-9:
+        for ex in exits:
+            pnl = run_simple_backtest(z, entry_z=float(e), exit_z=ex)
+            m = compute_metrics(pnl)
+            row = {"entry_z": float(e), "exit_z": ex, **m}
+            grid.append(row)
+            score = (m["sharpe"] or 0) + (-(m["max_dd"] or 0))
+            if best is None or score > ((best.get("sharpe") or 0) + (-(best.get("max_dd") or 0))):
+                best = row
+        e = round(e + entry_step, 3)
+    return {"grid": grid, "best": best}
 
 
 @app.post("/api/upload_ohlc")
@@ -186,7 +259,21 @@ async def upload_ohlc(file: UploadFile = File(...)) -> Dict[str, Any]:
         return {"ok": True, "rows": int(len(df))}
     except Exception as e:
         logger.exception("Upload failed")
-        return {"ok": False, "error": str(e)}
+    return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/analytics_quick")
+async def analytics_quick(
+    symbol_a: str = Query(...), symbol_b: str = Query(...), timeframe: str = Query("1s"), lookback_hours: int = Query(1)
+) -> Dict[str, Any]:
+    symbols = [symbol_a.lower(), symbol_b.lower()]
+    df = load_data_and_resample(symbols, timeframe, use_ohlc=False, lookback_hours=lookback_hours)
+    if df.empty:
+        return {"latest_zscore": None, "last": {symbols[0]: None, symbols[1]: None}}
+    hr = calculate_ols_hedge_ratio(df.tail(200), symbols[0], symbols[1])
+    spread = calculate_spread(df.tail(200), symbols[0], symbols[1], hr)
+    z = calculate_zscore(spread)
+    return {"latest_zscore": float(z.iloc[-1]) if len(z) else None, "last": {symbols[0]: float(df[symbols[0]].iloc[-1]), symbols[1]: float(df[symbols[1]].iloc[-1])}}
 
 
 @app.get("/api/heatmap")
@@ -226,3 +313,58 @@ async def set_subscriptions(symbols: str = Query(..., description="Comma-separat
             s.add(Subscription(symbol=sym))
         s.commit()
     return {"ok": True, "symbols": syms}
+
+
+# Alerts CRUD
+@app.get("/api/alerts")
+async def list_alerts() -> Dict[str, Any]:
+    eng = create_engine(SYNC_DB_URL)
+    with Session(eng) as s:
+        rows = s.query(AlertRule).all()
+        out = [
+            {"id": r.id, "name": r.name, "enabled": r.enabled, "symbol_a": r.symbol_a, "symbol_b": r.symbol_b,
+             "timeframe": r.timeframe, "z_threshold": r.z_threshold, "corr_min": r.corr_min,
+             "min_vol": r.min_vol, "hysteresis": r.hysteresis, "webhook_url": r.webhook_url}
+            for r in rows
+        ]
+    return {"alerts": out}
+
+
+@app.post("/api/alerts")
+async def create_alert(
+    name: str = Body(...), enabled: bool = Body(True), symbol_a: str = Body(...), symbol_b: str = Body(...), timeframe: str = Body("1s"),
+    z_threshold: float = Body(2.0), corr_min: float = Body(-1.0), min_vol: float = Body(0.0), hysteresis: float = Body(0.2), webhook_url: str | None = Body(None)
+) -> Dict[str, Any]:
+    eng = create_engine(SYNC_DB_URL)
+    with Session(eng) as s:
+        r = AlertRule(name=name, enabled=enabled, symbol_a=symbol_a.lower(), symbol_b=symbol_b.lower(), timeframe=timeframe,
+                      z_threshold=z_threshold, corr_min=corr_min, min_vol=min_vol, hysteresis=hysteresis, webhook_url=webhook_url)
+        s.add(r)
+        s.commit()
+        s.refresh(r)
+        return {"ok": True, "id": r.id}
+
+
+@app.patch("/api/alerts/{alert_id}")
+async def update_alert(alert_id: int, enabled: bool | None = Body(None)) -> Dict[str, Any]:
+    eng = create_engine(SYNC_DB_URL)
+    with Session(eng) as s:
+        r = s.get(AlertRule, alert_id)
+        if not r:
+            raise HTTPException(status_code=404, detail="Not found")
+        if enabled is not None:
+            r.enabled = bool(enabled)
+            s.commit()
+        return {"ok": True}
+
+
+@app.delete("/api/alerts/{alert_id}")
+async def delete_alert(alert_id: int) -> Dict[str, Any]:
+    eng = create_engine(SYNC_DB_URL)
+    with Session(eng) as s:
+        r = s.get(AlertRule, alert_id)
+        if not r:
+            raise HTTPException(status_code=404, detail="Not found")
+        s.delete(r)
+        s.commit()
+        return {"ok": True}

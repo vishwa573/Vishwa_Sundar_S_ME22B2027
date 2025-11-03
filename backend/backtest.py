@@ -44,3 +44,20 @@ def run_simple_backtest(zscore_series: pd.Series, entry_z: float = 2.0, exit_z: 
     cumulative_pnl = pnl.cumsum()
     
     return cumulative_pnl
+
+
+def compute_metrics(pnl: pd.Series) -> dict:
+    if pnl.empty:
+        return {"sharpe": None, "max_dd": None, "win_rate": None}
+    ret = pnl.diff().fillna(0)
+    std = ret.std(ddof=0)
+    sharpe = float(ret.mean() / std) if std and std != 0 else None
+    # Max drawdown
+    cummax = pnl.cummax()
+    dd = (pnl - cummax)
+    max_dd = float(dd.min()) if not dd.empty else None
+    # Win-rate (positive return steps)
+    wins = (ret > 0).sum()
+    total = (ret != 0).sum()
+    win_rate = float(wins / total) if total > 0 else None
+    return {"sharpe": sharpe, "max_dd": max_dd, "win_rate": win_rate}

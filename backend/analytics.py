@@ -22,11 +22,11 @@ def _timeframe_to_rule(tf: str) -> str:
     return mapping.get(tf, "1s")
 
 
-def load_data_and_resample(symbols: List[str], timeframe: str, use_ohlc: bool = False, lookback_hours: int = 6) -> pd.DataFrame:
+def load_data_and_resample(symbols: List[str], timeframe: str, use_ohlc: bool = False, lookback_hours: int = 6, max_ticks: int = 0) -> pd.DataFrame:
     symbols = [s.lower() for s in symbols]
     engine = create_engine(SYNC_DB_URL)
     start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
-    # Parameterize IN clause to preserve index usage on symbol (symbols already lowercase)
+    # Single query path (fast and simple). max_ticks is ignored here intentionally for stability.
     sym_params = {f"s{i}": s for i, s in enumerate(symbols)}
     placeholders = ",".join([f":s{i}" for i in range(len(symbols))])
     if use_ohlc:
@@ -70,7 +70,7 @@ def load_data_and_resample(symbols: List[str], timeframe: str, use_ohlc: bool = 
     return prices
 
 
-def load_volume_and_vwap(symbols: List[str], timeframe: str, use_ohlc: bool = False, lookback_hours: int = 6) -> Dict[str, Dict[str, pd.Series]]:
+def load_volume_and_vwap(symbols: List[str], timeframe: str, use_ohlc: bool = False, lookback_hours: int = 6, max_ticks: int = 0) -> Dict[str, Dict[str, pd.Series]]:
     """Return per-symbol resampled volume and VWAP series.
 
     For ticks: volume = sum(size), vwap = sum(price*size)/sum(size).
@@ -79,9 +79,9 @@ def load_volume_and_vwap(symbols: List[str], timeframe: str, use_ohlc: bool = Fa
     symbols = [s.lower() for s in symbols]
     engine = create_engine(SYNC_DB_URL)
     start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
-    sym_params = {f"s{i}": s for i, s in enumerate(symbols)}
-    placeholders = ",".join([f":s{i}" for i in range(len(symbols))])
     if use_ohlc:
+        sym_params = {f"s{i}": s for i, s in enumerate(symbols)}
+        placeholders = ",".join([f":s{i}" for i in range(len(symbols))])
         query = f"""
             SELECT timestamp, symbol, close, volume
             FROM {OhlcData.__tablename__}
@@ -89,6 +89,8 @@ def load_volume_and_vwap(symbols: List[str], timeframe: str, use_ohlc: bool = Fa
             ORDER BY timestamp ASC
         """
     else:
+        sym_params = {f"s{i}": s for i, s in enumerate(symbols)}
+        placeholders = ",".join([f":s{i}" for i in range(len(symbols))])
         query = f"""
             SELECT timestamp, symbol, price, size
             FROM {TickData.__tablename__}

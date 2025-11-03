@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import AsyncGenerator
 from pathlib import Path
 
-from sqlalchemy import DateTime, Float, Integer, String, UniqueConstraint, Index
+from sqlalchemy import DateTime, Float, Integer, String, UniqueConstraint, Index, Boolean, Text
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -50,9 +50,26 @@ class Subscription(Base):
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
 
 
+class AlertRule(Base):
+    __tablename__ = "alert_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    symbol_a: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    symbol_b: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), default="1s", nullable=False)
+    z_threshold: Mapped[float] = mapped_column(Float, default=2.0)
+    corr_min: Mapped[float] = mapped_column(Float, default=-1.0)
+    min_vol: Mapped[float] = mapped_column(Float, default=0.0)
+    hysteresis: Mapped[float] = mapped_column(Float, default=0.2)
+    webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 # Composite indexes to accelerate symbol + timestamp filters
 Index("idx_ticks_symbol_ts", TickData.symbol, TickData.timestamp)
 Index("idx_ohlc_symbol_ts", OhlcData.symbol, OhlcData.timestamp)
+Index("idx_alerts_pair_tf", AlertRule.symbol_a, AlertRule.symbol_b, AlertRule.timeframe)
 
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
