@@ -2,12 +2,12 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import List
+from typing import Dict, List, Set
 
 import websockets
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 
-from backend.database import TickData, get_session, init_db
+from backend.database import TickData, Subscription, get_session, init_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,15 +15,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ws-client")
 
-WS_URLS: List[str] = [
-    "wss://fstream.binance.com/ws/btcusdt@trade",
-    "wss://fstream.binance.com/ws/ethusdt@trade",
+DEFAULT_SYMBOLS: List[str] = [
+    "btcusdt",
+    "ethusdt",
+    "bnbusdt",
+    "xrpusdt",
+    "adausdt",
+    "solusdt",
 ]
 
 BUFFER: List[dict] = []
 BUFFER_LOCK = asyncio.Lock()
 BATCH_SIZE = 100
-FLUSH_INTERVAL_SEC = 1.0
+FLUSH_INTERVAL_SEC = 0.5
+
+# Live tasks per URL
+TASKS: Dict[str, asyncio.Task] = {}
+TASKS_LOCK = asyncio.Lock()
+
+
+def _url_for(sym: str) -> str:
+    return f"wss://fstream.binance.com/ws/{sym.lower()}@trade"
 
 
 def _parse_msg(msg: dict) -> dict | None:
@@ -71,7 +83,6 @@ async def _consume(url: str) -> None:
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
-                        # print(f"GOT A TICK: {msg}")
                     except json.JSONDecodeError:
                         continue
                     row = _parse_msg(msg)
@@ -81,16 +92,50 @@ async def _consume(url: str) -> None:
                         BUFFER.append(row)
                         if len(BUFFER) >= BATCH_SIZE:
                             asyncio.create_task(_flush_buffer("size"))
+        except asyncio.CancelledError:
+            logger.info("Cancelled consumer: %s", url)
+            break
         except Exception as e:
             logger.error("WebSocket error (%s): %s", url, e)
             await asyncio.sleep(3)
 
 
+async def _ensure_default_subscriptions():
+    # Seed defaults if empty
+    async with get_session() as s:
+        res = await s.execute(select(Subscription))
+        rows = res.scalars().all()
+        if not rows:
+            s.add_all([Subscription(symbol=sym) for sym in DEFAULT_SYMBOLS])
+
+
+async def _subscription_manager():
+    while True:
+        try:
+            async with get_session() as s:
+                res = await s.execute(select(Subscription))
+                rows = res.scalars().all()
+                syms = {r.symbol.lower() for r in rows}
+            desired_urls: Set[str] = {_url_for(sym) for sym in syms}
+            async with TASKS_LOCK:
+                # Start new tasks
+                for url in desired_urls - set(TASKS.keys()):
+                    TASKS[url] = asyncio.create_task(_consume(url))
+                # Cancel removed tasks
+                for url in set(TASKS.keys()) - desired_urls:
+                    TASKS[url].cancel()
+                    del TASKS[url]
+        except Exception as e:
+            logger.error("Subscription manager error: %s", e)
+        await asyncio.sleep(5)
+
+
 async def main() -> None:
     await init_db()
-    tasks = [asyncio.create_task(_consume(u)) for u in WS_URLS]
-    tasks.append(asyncio.create_task(_periodic_flusher()))
-    await asyncio.gather(*tasks)
+    await _ensure_default_subscriptions()
+    mgr = asyncio.create_task(_subscription_manager())
+    flusher = asyncio.create_task(_periodic_flusher())
+    await asyncio.gather(mgr, flusher)
 
 
 if __name__ == "__main__":

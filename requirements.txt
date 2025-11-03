@@ -11,3 +11,6 @@ sqlalchemy
 aiofiles
 requests
 aiosqlite
+scikit-learn
+python-multipart
+pykalman

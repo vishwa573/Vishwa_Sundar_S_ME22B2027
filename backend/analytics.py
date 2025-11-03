@@ -3,13 +3,15 @@ from __future__ import annotations
 from typing import List, Dict, Any
 
 import logging
+from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import adfuller
 from sqlalchemy import create_engine
+from sklearn.linear_model import HuberRegressor
 
-from backend.database import SYNC_DB_URL
+from backend.database import SYNC_DB_URL, TickData, OhlcData
 
 logger = logging.getLogger("analytics")
 
@@ -19,20 +21,29 @@ def _timeframe_to_rule(tf: str) -> str:
     return mapping.get(tf, "1S")
 
 
-def load_data_and_resample(symbols: List[str], timeframe: str) -> pd.DataFrame:
+def load_data_and_resample(symbols: List[str], timeframe: str, use_ohlc: bool = False, lookback_hours: int = 6) -> pd.DataFrame:
     symbols = [s.lower() for s in symbols]
     engine = create_engine(SYNC_DB_URL)
     placeholders = ",".join([f"'{s}'" for s in symbols])
-    query = f"""
-        SELECT timestamp, lower(symbol) AS symbol, price, size
-        FROM ticks
-        WHERE lower(symbol) IN ({placeholders})
-        ORDER BY timestamp ASC
-    """
-    df = pd.read_sql(query, con=engine)
-    logger.info("Loaded %d raw ticks from database at %s", len(df), engine.url)
+    start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    if use_ohlc:
+        query = f"""
+            SELECT timestamp, lower(symbol) AS symbol, close AS price
+            FROM {OhlcData.__tablename__}
+            WHERE lower(symbol) IN ({placeholders}) AND timestamp >= :start_time
+            ORDER BY timestamp ASC
+        """
+    else:
+        query = f"""
+            SELECT timestamp, lower(symbol) AS symbol, price, size
+            FROM {TickData.__tablename__}
+            WHERE lower(symbol) IN ({placeholders}) AND timestamp >= :start_time
+            ORDER BY timestamp ASC
+        """
+    df = pd.read_sql(query, con=engine, params={"start_time": start_time})
+    logger.info("Loaded %d rows from %s (lookback=%dh)", len(df), "ohlc" if use_ohlc else "ticks", lookback_hours)
     if df.empty:
-        logger.warning("Analytics: No data loaded from DB. Check if DB path is correct.")
+        logger.warning("Analytics: No data loaded from DB.")
         return pd.DataFrame()
 
     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -55,6 +66,72 @@ def load_data_and_resample(symbols: List[str], timeframe: str) -> pd.DataFrame:
     return prices
 
 
+def load_volume_and_vwap(symbols: List[str], timeframe: str, use_ohlc: bool = False, lookback_hours: int = 6) -> Dict[str, Dict[str, pd.Series]]:
+    """Return per-symbol resampled volume and VWAP series.
+
+    For ticks: volume = sum(size), vwap = sum(price*size)/sum(size).
+    For ohlc: volume from table if present; vwap approximated by close (fallback).
+    """
+    symbols = [s.lower() for s in symbols]
+    engine = create_engine(SYNC_DB_URL)
+    placeholders = ",".join([f"'{s}'" for s in symbols])
+    start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    if use_ohlc:
+        query = f"""
+            SELECT timestamp, lower(symbol) AS symbol, close, volume
+            FROM {OhlcData.__tablename__}
+            WHERE lower(symbol) IN ({placeholders}) AND timestamp >= :start_time
+            ORDER BY timestamp ASC
+        """
+    else:
+        query = f"""
+            SELECT timestamp, lower(symbol) AS symbol, price, size
+            FROM {TickData.__tablename__}
+            WHERE lower(symbol) IN ({placeholders}) AND timestamp >= :start_time
+            ORDER BY timestamp ASC
+        """
+    df = pd.read_sql(query, con=engine, params={"start_time": start_time})
+    if df.empty:
+        return {}
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.set_index("timestamp").sort_index()
+    rule = _timeframe_to_rule(timeframe)
+
+    out: Dict[str, Dict[str, pd.Series]] = {}
+    for sym in symbols:
+        d = df[df["symbol"] == sym]
+        if d.empty:
+            continue
+        if use_ohlc:
+            vol = d.get("volume", pd.Series(index=d.index, dtype=float)).resample(rule).sum(min_count=1)
+            vwap = d["close"].resample(rule).last()
+        else:
+            vol = d["size"].resample(rule).sum(min_count=1)
+            pv = (d["price"] * d["size"]).resample(rule).sum(min_count=1)
+            vwap = pv / vol.replace({0.0: np.nan})
+        out[sym] = {"volume": vol, "vwap": vwap}
+    return out
+
+
+def rolling_adf_pvalues(series: pd.Series, window: int, step: int = 5) -> pd.Series:
+    s = series.dropna()
+    if window <= 0 or len(s) < window:
+        return pd.Series([], dtype=float, index=series.index)
+    idx = []
+    vals = []
+    arr = s.values
+    times = s.index
+    for start in range(0, len(arr) - window + 1, step):
+        end = start + window
+        try:
+            stat, p, *_ = adfuller(arr[start:end], autolag="AIC")
+        except Exception:
+            p = np.nan
+        idx.append(times[end - 1])
+        vals.append(float(p) if p is not None else np.nan)
+    return pd.Series(vals, index=pd.to_datetime(idx))
+
+
 def calculate_ols_hedge_ratio(df: pd.DataFrame, symbol_a: str, symbol_b: str) -> float:
     df2 = df[[symbol_a, symbol_b]].dropna()
     if df2.shape[0] < 2:
@@ -62,6 +139,46 @@ def calculate_ols_hedge_ratio(df: pd.DataFrame, symbol_a: str, symbol_b: str) ->
     X = sm.add_constant(df2[symbol_b])
     model = sm.OLS(df2[symbol_a], X).fit()
     return float(model.params[symbol_b])
+
+
+def calculate_huber_hedge_ratio(df: pd.DataFrame, symbol_a: str, symbol_b: str) -> float:
+    df2 = df[[symbol_a, symbol_b]].dropna()
+    if df2.shape[0] < 2:
+        return float("nan")
+    X = df2[[symbol_b]].values
+    y = df2[symbol_a].values
+    reg = HuberRegressor()
+    reg.fit(X, y)
+    return float(reg.coef_[0])
+
+
+def calculate_kalman_hedge_ratio(df: pd.DataFrame, symbol_a: str, symbol_b: str) -> float:
+    """Estimate a time-varying hedge ratio beta_t using a simple 1D Kalman Filter.
+
+    Model: y_t = beta_t * x_t + e_t,   beta_t = beta_{t-1} + w_t
+    Returns the latest beta_t.
+    """
+    try:
+        from pykalman import KalmanFilter  # type: ignore
+    except Exception:
+        return float("nan")
+    df2 = df[[symbol_a, symbol_b]].dropna()
+    if df2.shape[0] < 5:
+        return float("nan")
+    y = df2[symbol_a].values
+    x = df2[symbol_b].values
+    # Time-varying observation matrix (N x 1 x 1)
+    obs_mats = x.reshape(-1, 1, 1)
+    kf = KalmanFilter(
+        transition_matrices=[1.0],
+        observation_matrices=obs_mats,
+        initial_state_mean=1.0,
+        initial_state_covariance=1.0,
+        transition_covariance=1e-4,   # process noise
+        observation_covariance=1e-2,  # measurement noise
+    )
+    state_means, _ = kf.filter(y)
+    return float(state_means[-1][0])
 
 
 def calculate_spread(df: pd.DataFrame, symbol_a: str, symbol_b: str, hedge_ratio: float) -> pd.Series:

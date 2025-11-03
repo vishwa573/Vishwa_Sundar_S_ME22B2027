@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import AsyncGenerator
 from pathlib import Path
 
-from sqlalchemy import DateTime, Float, Integer, String
+from sqlalchemy import DateTime, Float, Integer, String, UniqueConstraint
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -28,6 +28,26 @@ class TickData(Base):
     symbol: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     price: Mapped[float] = mapped_column(Float, nullable=False)
     size: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class OhlcData(Base):
+    __tablename__ = "ohlc"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, index=True, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    open: Mapped[float] = mapped_column(Float, nullable=True)
+    high: Mapped[float] = mapped_column(Float, nullable=True)
+    low: Mapped[float] = mapped_column(Float, nullable=True)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    volume: Mapped[float] = mapped_column(Float, nullable=True)
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
 
 
 @asynccontextmanager

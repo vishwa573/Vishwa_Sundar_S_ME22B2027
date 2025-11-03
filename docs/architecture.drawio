@@ -1,0 +1,14 @@
+<mxfile host="app.diagrams.net" modified="2025-11-03T00:00:00.000Z" agent="quant-analytics-dashboard" version="20.8.10" editor="www.diagrams.net"><diagram id="arch" name="Architecture"><mxGraphModel dx="1180" dy="740" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" background="#ffffff"><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+<mxCell id="ws" value="Binance WS (trades)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#0288d1;" vertex="1" parent="1"><mxGeometry x="60" y="120" width="180" height="60" as="geometry"/></mxCell>
+<mxCell id="ing" value="WebSocket Ingester\n(websockets, asyncio)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#ef6c00;" vertex="1" parent="1"><mxGeometry x="300" y="120" width="220" height="80" as="geometry"/></mxCell>
+<mxCell id="db" value="SQLite (ticks.db)\nSQLAlchemy async" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#6a1b9a;" vertex="1" parent="1"><mxGeometry x="580" y="120" width="200" height="80" as="geometry"/></mxCell>
+<mxCell id="ohlc" value="OHLC Upload (CSV)\n/ api/upload_ohlc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f8e9;strokeColor=#558b2f;" vertex="1" parent="1"><mxGeometry x="580" y="240" width="200" height="70" as="geometry"/></mxCell>
+<mxCell id="api" value="FastAPI (/api)\nanalytics, adf, backtest" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#303f9f;" vertex="1" parent="1"><mxGeometry x="850" y="120" width="200" height="90" as="geometry"/></mxCell>
+<mxCell id="fe" value="Streamlit + Plotly\n(controls, charts, alerts)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0f2f1;strokeColor=#00796b;" vertex="1" parent="1"><mxGeometry x="1090" y="120" width="220" height="90" as="geometry"/></mxCell>
+
+<mxCell id="e1" edge="1" parent="1" source="ws" target="ing" style="endArrow=block;strokeColor=#555;"/>
+<mxCell id="e2" edge="1" parent="1" source="ing" target="db" style="endArrow=block;strokeColor=#555;"/>
+<mxCell id="e3" edge="1" parent="1" source="db" target="api" style="endArrow=block;strokeColor=#555;"/>
+<mxCell id="e4" edge="1" parent="1" source="ohlc" target="api" style="endArrow=block;strokeColor=#555;"/>
+<mxCell id="e5" edge="1" parent="1" source="api" target="fe" style="endArrow=block;strokeColor=#555;"/>
+</root></mxGraphModel></diagram></mxfile>
