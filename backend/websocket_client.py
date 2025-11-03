@@ -7,7 +7,7 @@ from typing import Dict, List, Set
 import websockets
 from sqlalchemy import insert, select
 
-from backend.database import TickData, Subscription, get_session, init_db
+from backend.database import TickData, Subscription, get_session, init_db, TICKS_DB_PATH
 
 logging.basicConfig(
     level=logging.INFO,
@@ -131,6 +131,14 @@ async def _subscription_manager():
 
 
 async def main() -> None:
+    # Optional reset: set FORCE_DB_RESET=1 to drop DB once and recreate indexes
+    import os
+    try:
+        if os.getenv("FORCE_DB_RESET") == "1" and TICKS_DB_PATH.exists():
+            TICKS_DB_PATH.unlink()
+            logger.info("Removed old database to apply new index (FORCE_DB_RESET=1).")
+    except Exception as e:
+        logger.warning("Could not remove old database: %s", e)
     await init_db()
     await _ensure_default_subscriptions()
     mgr = asyncio.create_task(_subscription_manager())

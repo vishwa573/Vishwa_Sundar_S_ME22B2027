@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import AsyncGenerator
 from pathlib import Path
 
-from sqlalchemy import DateTime, Float, Integer, String, UniqueConstraint
+from sqlalchemy import DateTime, Float, Integer, String, UniqueConstraint, Index
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -49,6 +49,10 @@ class Subscription(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
 
+
+# Composite indexes to accelerate symbol + timestamp filters
+Index("idx_ticks_symbol_ts", TickData.symbol, TickData.timestamp)
+Index("idx_ohlc_symbol_ts", OhlcData.symbol, OhlcData.timestamp)
 
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

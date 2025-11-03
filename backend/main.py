@@ -51,10 +51,24 @@ async def analytics(
     symbols = [symbol_a.lower(), symbol_b.lower()]
     df = load_data_and_resample(symbols, timeframe, use_ohlc, lookback_hours)
 
-    # Cold start guard
-    if df.empty or len(df) < rolling_window:
+    # Cold start guard: return whatever price data we have, defer analytics until enough points
+    if df.empty:
         return {
             "price_data": {"index": [], symbol_a.lower(): [], symbol_b.lower(): []},
+            "spread": [],
+            "zscore": [],
+            "rolling_corr": [],
+            "hedge_ratio": None,
+            "latest_zscore": None,
+        }
+    if len(df) < rolling_window:
+        idx = [i.isoformat() for i in df.index]
+        return {
+            "price_data": {
+                "index": idx,
+                symbols[0]: df[symbols[0]].tolist(),
+                symbols[1]: df[symbols[1]].tolist(),
+            },
             "spread": [],
             "zscore": [],
             "rolling_corr": [],

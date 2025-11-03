@@ -17,30 +17,34 @@ logger = logging.getLogger("analytics")
 
 
 def _timeframe_to_rule(tf: str) -> str:
-    mapping = {"1s": "1S", "1m": "1T", "5m": "5T"}
-    return mapping.get(tf, "1S")
+    # Use lowercase offset aliases to avoid FutureWarning and ensure fast resample
+    mapping = {"1s": "1s", "1m": "1min", "5m": "5min"}
+    return mapping.get(tf, "1s")
 
 
 def load_data_and_resample(symbols: List[str], timeframe: str, use_ohlc: bool = False, lookback_hours: int = 6) -> pd.DataFrame:
     symbols = [s.lower() for s in symbols]
     engine = create_engine(SYNC_DB_URL)
-    placeholders = ",".join([f"'{s}'" for s in symbols])
     start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    # Parameterize IN clause to preserve index usage on symbol (symbols already lowercase)
+    sym_params = {f"s{i}": s for i, s in enumerate(symbols)}
+    placeholders = ",".join([f":s{i}" for i in range(len(symbols))])
     if use_ohlc:
         query = f"""
-            SELECT timestamp, lower(symbol) AS symbol, close AS price
+            SELECT timestamp, symbol, close AS price
             FROM {OhlcData.__tablename__}
-            WHERE lower(symbol) IN ({placeholders}) AND timestamp >= :start_time
+            WHERE symbol IN ({placeholders}) AND timestamp >= :start_time
             ORDER BY timestamp ASC
         """
     else:
         query = f"""
-            SELECT timestamp, lower(symbol) AS symbol, price, size
+            SELECT timestamp, symbol, price, size
             FROM {TickData.__tablename__}
-            WHERE lower(symbol) IN ({placeholders}) AND timestamp >= :start_time
+            WHERE symbol IN ({placeholders}) AND timestamp >= :start_time
             ORDER BY timestamp ASC
         """
-    df = pd.read_sql(query, con=engine, params={"start_time": start_time})
+    params = {"start_time": start_time, **sym_params}
+    df = pd.read_sql(query, con=engine, params=params)
     logger.info("Loaded %d rows from %s (lookback=%dh)", len(df), "ohlc" if use_ohlc else "ticks", lookback_hours)
     if df.empty:
         logger.warning("Analytics: No data loaded from DB.")
@@ -74,23 +78,25 @@ def load_volume_and_vwap(symbols: List[str], timeframe: str, use_ohlc: bool = Fa
     """
     symbols = [s.lower() for s in symbols]
     engine = create_engine(SYNC_DB_URL)
-    placeholders = ",".join([f"'{s}'" for s in symbols])
     start_time = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    sym_params = {f"s{i}": s for i, s in enumerate(symbols)}
+    placeholders = ",".join([f":s{i}" for i in range(len(symbols))])
     if use_ohlc:
         query = f"""
-            SELECT timestamp, lower(symbol) AS symbol, close, volume
+            SELECT timestamp, symbol, close, volume
             FROM {OhlcData.__tablename__}
-            WHERE lower(symbol) IN ({placeholders}) AND timestamp >= :start_time
+            WHERE symbol IN ({placeholders}) AND timestamp >= :start_time
             ORDER BY timestamp ASC
         """
     else:
         query = f"""
-            SELECT timestamp, lower(symbol) AS symbol, price, size
+            SELECT timestamp, symbol, price, size
             FROM {TickData.__tablename__}
-            WHERE lower(symbol) IN ({placeholders}) AND timestamp >= :start_time
+            WHERE symbol IN ({placeholders}) AND timestamp >= :start_time
             ORDER BY timestamp ASC
         """
-    df = pd.read_sql(query, con=engine, params={"start_time": start_time})
+    params = {"start_time": start_time, **sym_params}
+    df = pd.read_sql(query, con=engine, params=params)
     if df.empty:
         return {}
     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -117,6 +123,11 @@ def rolling_adf_pvalues(series: pd.Series, window: int, step: int = 5) -> pd.Ser
     s = series.dropna()
     if window <= 0 or len(s) < window:
         return pd.Series([], dtype=float, index=series.index)
+    # Cap total ADF evaluations to avoid timeouts
+    max_evals = 500
+    total_windows = max(1, len(s) - window + 1)
+    if total_windows > max_evals:
+        step = max(step, total_windows // max_evals)
     idx = []
     vals = []
     arr = s.values

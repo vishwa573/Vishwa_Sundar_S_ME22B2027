@@ -1,6 +1,7 @@
 import io
 import json
 import math
+import time
 import requests
 import pandas as pd
 import plotly.graph_objects as go
@@ -21,11 +22,15 @@ min_corr = st.sidebar.slider("Min Rolling Corr (alerts)", min_value=-1.0, max_va
 hyst = st.sidebar.slider("Alert Hysteresis", min_value=0.0, max_value=1.0, value=0.2, step=0.05)
 min_vol = st.sidebar.number_input("Min Volume per bar (alerts)", value=0.0, step=1.0)
 lookback_hours = st.sidebar.number_input("Lookback Hours", min_value=1, max_value=168, value=6)
+# Refresh controls
+auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
+refresh_ms = st.sidebar.slider("Refresh interval (ms)", min_value=500, max_value=5000, value=1500, step=100)
 adf_win = st.sidebar.slider("Rolling ADF Window (0=off)", min_value=0, max_value=300, value=0, step=10)
 run_adf = st.sidebar.button("Run ADF Test on Spread")
 
-# Faster refresh for near-real-time
-st_autorefresh(interval=500)
+# Auto-refresh (toggleable)
+if auto_refresh:
+    st_autorefresh(interval=int(refresh_ms))
 
 API_BASE = "http://localhost:8000"
 
@@ -72,18 +77,26 @@ with adf_box:
 # Sidebar: Dynamic subscriptions
 st.sidebar.markdown("---")
 st.sidebar.subheader("Live Subscriptions")
-try:
-    sub = requests.get(f"{API_BASE}/api/subscriptions", timeout=5).json().get("symbols", [])
-except Exception:
-    sub = []
+
+@st.cache_data(ttl=10)
+def get_subscriptions_cached():
+    try:
+        return requests.get(f"{API_BASE}/api/subscriptions", timeout=5).json().get("symbols", [])
+    except Exception:
+        return []
+
+sub = get_subscriptions_cached()
 all_syms = sorted(list(set(sub + ["btcusdt","ethusdt","bnbusdt","xrpusdt","adausdt","solusdt","ltcusdt","dogeusdt"])) )
 sel_subs = st.sidebar.multiselect("Subscribe symbols", options=all_syms, default=sub)
-if st.sidebar.button("Apply Subscriptions"):
+colA, colB = st.sidebar.columns([1,1])
+if colA.button("Apply Subscriptions"):
     try:
         requests.post(f"{API_BASE}/api/subscriptions", params={"symbols": ",".join(sel_subs)}, timeout=10)
         st.sidebar.success("Updated subscriptions (ingester will adjust within ~5s)")
     except Exception as e:
         st.sidebar.error(f"Failed to update subscriptions: {e}")
+if colB.button("Refresh List"):
+    get_subscriptions_cached.clear()
 
 @st.cache_data(ttl=1)
 def fetch_analytics(symbol_a: str, symbol_b: str, timeframe: str, rolling_window: int, regression_type: str, use_ohlc: bool, adf_window: int, lookback_hours: int):
@@ -122,7 +135,11 @@ def to_dataframe(data: dict) -> pd.DataFrame:
 st.title("Real-Time Quantitative Analytics Dashboard")
 
 try:
+    t0 = time.perf_counter()
     data = fetch_analytics(symbol_a, symbol_b, timeframe, rolling_window, regression_type, use_ohlc, adf_win, lookback_hours)
+    api_ms = (time.perf_counter() - t0) * 1000
+    st.sidebar.subheader("Diagnostics")
+    st.sidebar.text(f"API {api_ms:.0f} ms | points={len(data.get('price_data',{}).get('index',[]))}")
 except Exception as e:
     st.error(f"Failed to fetch analytics: {e}")
     st.stop()
@@ -147,11 +164,11 @@ if vwap_map.get(symbol_a):
     fig_price.add_trace(go.Scatter(x=frame.index, y=vwap_map[symbol_a], name=f"{symbol_a.upper()} VWAP", line=dict(dash="dot")))
 if vwap_map.get(symbol_b):
     fig_price.add_trace(go.Scatter(x=frame.index, y=vwap_map[symbol_b], name=f"{symbol_b.upper()} VWAP", line=dict(dash="dot")))
-fig_price.update_layout(title="Prices", xaxis_title="Time", yaxis_title="Price", legend_title="Symbols")
+fig_price.update_layout(title="Prices", xaxis_title="Time", yaxis_title="Price", legend_title="Symbols", template="plotly_dark")
 
 fig_spread = go.Figure()
 fig_spread.add_trace(go.Scatter(x=frame.index, y=frame["spread"], name="Spread"))
-fig_spread.update_layout(title="Spread", xaxis_title="Time", yaxis_title="Spread")
+fig_spread.update_layout(title="Spread", xaxis_title="Time", yaxis_title="Spread", template="plotly_dark")
 
 fig_z = go.Figure()
 fig_z.add_trace(go.Scatter(x=frame.index, y=frame["zscore"], name="Z-Score"))
@@ -160,20 +177,20 @@ pvals = data.get("adf_pvalues")
 if pvals:
     fig_z.add_trace(go.Scatter(x=frame.index, y=pvals, name="ADF p-value", yaxis="y2", line=dict(color="orange")))
     fig_z.update_layout(yaxis2=dict(overlaying='y', side='right', title='p-value', range=[0,1]))
-fig_z.update_layout(title="Z-Score", xaxis_title="Time", yaxis_title="Z-Score")
+fig_z.update_layout(title="Z-Score", xaxis_title="Time", yaxis_title="Z-Score", template="plotly_dark")
 
 fig_corr = go.Figure()
 fig_corr.add_trace(go.Scatter(x=frame.index, y=frame["rolling_corr"], name="Rolling Corr"))
-fig_corr.update_layout(title="Rolling Correlation", xaxis_title="Time", yaxis_title="Correlation")
+fig_corr.update_layout(title="Rolling Correlation", xaxis_title="Time", yaxis_title="Correlation", template="plotly_dark")
 
 # Volume chart
 vol_map = data.get("volume", {})
 fig_vol = go.Figure()
 if vol_map.get(symbol_a):
-    fig_vol.add_trace(go.Bar(x=frame.index, y=vol_map[symbol_a], name=f"{symbol_a.upper()} Vol", opacity=0.6))
+    fig_vol.add_trace(go.Bar(x=frame.index, y=vol_map[symbol_a], name=f"{symbol_a.upper()} Vol", opacity=1.0))
 if vol_map.get(symbol_b):
-    fig_vol.add_trace(go.Bar(x=frame.index, y=vol_map[symbol_b], name=f"{symbol_b.upper()} Vol", opacity=0.6))
-fig_vol.update_layout(title="Resampled Volume", xaxis_title="Time", yaxis_title="Volume")
+    fig_vol.add_trace(go.Bar(x=frame.index, y=vol_map[symbol_b], name=f"{symbol_b.upper()} Vol", opacity=1.0))
+fig_vol.update_layout(title="Resampled Volume", xaxis_title="Time", yaxis_title="Volume", template="plotly_dark")
 
 # Tabs layout
 tab_dash, tab_charts, tab_heat, tab_data, tab_bt = st.tabs(["Dashboard", "Detailed Charts", "Heatmap", "Data View", "Backtest"])
@@ -186,6 +203,29 @@ with tab_dash:
         st.metric("Hedge Ratio", hr_display)
     with m3:
         st.metric("Rolling Corr (last)", None if frame["rolling_corr"].dropna().empty else f"{frame['rolling_corr'].dropna().iloc[-1]:.2f}")
+
+    # Summary price stats (baseline requirement)
+    try:
+        stats_idx = [symbol_a.upper(), symbol_b.upper()]
+        last_vals = [frame[symbol_a].iloc[-1], frame[symbol_b].iloc[-1]]
+        mean_vals = [frame[symbol_a].mean(), frame[symbol_b].mean()]
+        std_vals = [frame[symbol_a].std(), frame[symbol_b].std()]
+        # 1m/5m pct changes via resample to 1min/5min
+        re_1m = frame[[symbol_a, symbol_b]].resample("1min").last().pct_change().iloc[-1].fillna(0)
+        re_5m = frame[[symbol_a, symbol_b]].resample("5min").last().pct_change().iloc[-1].fillna(0)
+        stats_df = pd.DataFrame(
+            {
+                "Last": last_vals,
+                "Mean": mean_vals,
+                "Std": std_vals,
+                "1m %": [re_1m.get(symbol_a, 0.0), re_1m.get(symbol_b, 0.0)],
+                "5m %": [re_5m.get(symbol_a, 0.0), re_5m.get(symbol_b, 0.0)],
+            },
+            index=stats_idx,
+        )
+        st.dataframe(stats_df)
+    except Exception:
+        pass
 
     # Rule-based alerts with hysteresis
     if "alert_state" not in st.session_state:
@@ -211,31 +251,30 @@ with tab_dash:
     elif st.session_state.alert_state["corr"] and corr_now >= min_corr + hyst:
         st.session_state.alert_state["corr"] = False
 
-    st.plotly_chart(fig_price, use_container_width=True)
-    st.plotly_chart(fig_z, use_container_width=True)
-    st.plotly_chart(fig_vol, use_container_width=True)
+    st.plotly_chart(fig_price, width='stretch')
+    st.plotly_chart(fig_z, width='stretch')
+    st.plotly_chart(fig_vol, width='stretch')
 
 with tab_charts:
-    st.plotly_chart(fig_spread, use_container_width=True)
-    st.plotly_chart(fig_corr, use_container_width=True)
+    st.plotly_chart(fig_spread, width='stretch')
+    st.plotly_chart(fig_corr, width='stretch')
 
 with tab_heat:
     st.subheader("Cross-correlation Heatmap")
     heat_syms = st.multiselect("Symbols", options=sel_subs or all_syms, default=(sel_subs[:6] if sel_subs else all_syms[:6]))
     heat_win = st.slider("Window (bars)", min_value=20, max_value=300, value=60, step=10)
-    if heat_syms:
+    compute_hm = st.button("Compute heatmap")
+    if compute_hm and heat_syms:
         try:
             r = requests.get(f"{API_BASE}/api/heatmap", params={"symbols": ",".join(heat_syms), "timeframe": timeframe, "window": heat_win, "use_ohlc": json.dumps(use_ohlc)}, timeout=10)
             mat = r.json()
-            import plotly.figure_factory as ff
-            import numpy as np
+            import plotly.express as px
             z = mat.get("matrix", [])
             x = mat.get("symbols", [])
             if z and x:
-                import plotly.express as px
                 fig_hm = px.imshow(z, x=x, y=x, color_continuous_scale="RdBu", origin="lower", zmin=-1, zmax=1)
-                fig_hm.update_layout(title="Correlation Heatmap")
-                st.plotly_chart(fig_hm, use_container_width=True)
+                fig_hm.update_layout(title="Correlation Heatmap", template="plotly_dark")
+                st.plotly_chart(fig_hm, width='stretch')
             else:
                 st.info("Heatmap waiting for data…")
         except Exception as e:
@@ -251,24 +290,26 @@ with tab_data:
         mime="text/csv",
     )
     
-    # Signals table for a few pairs
+# Signals table for a few pairs
     st.subheader("Signals (latest)")
-    import itertools
-    pairs = list(itertools.combinations(sel_subs if sel_subs else all_syms[:4], 2))[:6]
-    rows = []
-    for a,b in pairs:
-        try:
-            x = fetch_analytics(a, b, timeframe, rolling_window, regression_type, use_ohlc, 0, lookback_hours)
-            zlast = x.get("latest_zscore")
-            corr_series = x.get("rolling_corr", [])
-            corr_last = corr_series[-1] if corr_series else None
-            rows.append({"pair": f"{a.upper()}-{b.upper()}", "z": zlast, "corr": corr_last, "hr": x.get("hedge_ratio")})
-        except Exception:
-            pass
-    if rows:
-        sig_df = pd.DataFrame(rows)
-        st.dataframe(sig_df)
-        st.download_button("Download Signals CSV", data=sig_df.to_csv(index=False).encode("utf-8"), file_name="signals.csv", mime="text/csv")
+    compute_signals = st.checkbox("Compute signals (may be slow)", value=False)
+    if compute_signals:
+        import itertools
+        pairs = list(itertools.combinations(sel_subs if sel_subs else all_syms[:4], 2))[:6]
+        rows = []
+        for a,b in pairs:
+            try:
+                x = fetch_analytics(a, b, timeframe, rolling_window, regression_type, use_ohlc, 0, lookback_hours)
+                zlast = x.get("latest_zscore")
+                corr_series = x.get("rolling_corr", [])
+                corr_last = corr_series[-1] if corr_series else None
+                rows.append({"pair": f"{a.upper()}-{b.upper()}", "z": zlast, "corr": corr_last, "hr": x.get("hedge_ratio")})
+            except Exception:
+                pass
+        if rows:
+            sig_df = pd.DataFrame(rows)
+            st.dataframe(sig_df)
+            st.download_button("Download Signals CSV", data=sig_df.to_csv(index=False).encode("utf-8"), file_name="signals.csv", mime="text/csv")
 
 @st.cache_data(ttl=1)
 def fetch_backtest(symbol_a: str, symbol_b: str, timeframe: str, entry_z: float, exit_z: float, regression_type: str, use_ohlc: bool):
