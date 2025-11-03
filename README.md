@@ -93,8 +93,28 @@ The key bottlenecks we observed are intentional to surface real-world trade-offs
 - Database Contention: as the single `ticks.db` grows, SQLite’s single-file design introduces write-locking contention when the high-frequency WebSocket ingester flushes batches while the analytics API performs large reads, causing I/O stalls and increased latency.
 - API Latency: CPU-heavy analytics (e.g., Kalman filters, rolling ADF, backtest grid) executed inline with live requests can lead to slow responses or timeouts under load, especially with longer lookbacks or multiple concurrent users.
 
-### Future Mitigation (Production-Scale Path)
+## Future Mitigation (Production-Scale Path)
 Database: migrate from SQLite to a client-server store like PostgreSQL (row-store with robust concurrency) or a purpose-built time-series database (e.g., InfluxDB) to sustain high-concurrent reads/writes and large histories. Partitioning, proper indexes, and WAL/retention policies would further reduce contention.
 
 API/Analytics: move heavy analytics to asynchronous workers (e.g., Celery) and cache results in Redis so the API only serves cached summaries for near-instant responses. Long-running jobs (rolling ADF, Kalman, grid search) would be scheduled, materialized, and streamed to the UI as they complete rather than computed in-request.
+
+## Tried Solutions & Key Decisions
+- Ingestion: evaluated high-level client libraries and chose bare `websockets` for precise control over stream handling and retry behavior.
+- Persistence: started with per-tick inserts; switched to batch writes via async SQLAlchemy to reduce lock contention and improve throughput.
+- Analytics: compared OLS, Huber, and Kalman hedge ratios; kept all to let users trade off robustness vs. responsiveness. Tuned lookbacks to balance stability and latency.
+- Frontend: considered Plotly Dash; chose Streamlit to deliver faster within the assignment timeline while retaining Plotly for charts.
+- Data options: added optional OHLC CSV upload to validate algorithms offline and support reproducibility.
+
+## Challenges Faced and What We Learned
+- SQLite write locks under concurrent reads/writes: batching significantly reduced contention; a server DB (Postgres/TSDB) is the long-term fix.
+- Timestamp alignment between BTCUSDT and ETHUSDT: normalized to UTC and resampled to a common cadence before computing spread/correlation to avoid bias.
+- ADF sensitivity on short samples: very short windows can yield unstable p-values; prefer longer windows or cached/materialized stats for stability.
+- UI refresh vs. API compute: aggressive refresh intervals can collide with heavy analytics; caching or background workers mitigate this.
+
+## Additional (Out-of-scope) Items Worth Calling Out
+These were considered or partially explored because they strengthen a production version, though not required by the assignment:
+- Enable SQLite WAL mode and indices on time/symbol to improve concurrent access.
+- Background jobs + Redis cache for heavy analytics with streaming partial results to the UI.
+- Postgres migration with partitioning and retention policy for long histories.
+- Robust reconnect/backoff for WebSocket ingestion with jitter and health probes.
 
